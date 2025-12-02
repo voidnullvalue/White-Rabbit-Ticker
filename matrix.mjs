@@ -41,6 +41,7 @@ import mpdData from "./mpddata.mjs";
 // import filedata from "./filedata.mjs";
 import wttr from "./wttr.mjs";
 import time from "./time.mjs";
+import octoprint from "./octoprint.mjs";
 
 // List of modules that will be shown in sequence.
 //
@@ -60,8 +61,8 @@ const MODULES = [
 //  lobsters,
 //  filedata,
   wttr,
+  octoprint,
   time, 
-
 ];
 
 // Create UDP socket for sending DRGB packets to WLED
