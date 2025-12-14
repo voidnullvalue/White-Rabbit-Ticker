@@ -40,15 +40,14 @@ node -v
 ```
 
 * If it prints **v18.x** or **v20.x**, good.
-* If it says “command not found” or some ancient version, go install a current Node.js (how you do that is up to you: nvm, distro packages, etc.).
+* If it says “command not found” or some ancient version, install a current Node.js (nvm, distro packages, etc.).
 
 ### Step 3 – Put the project somewhere
 
 Example:
 
 ```bash
-mkdir -p ~/white-rabbit-ticker
-cd ~/white-rabbit-ticker
+mkdir -p ~/white-rabbit-ticker && cd ~/white-rabbit-ticker
 # put matrix.mjs and all the *.mjs modules in this folder
 ```
 
@@ -67,32 +66,24 @@ You should end up with something like:
 Inside the project folder:
 
 ```bash
-npm init -y
-npm install node-fetch
+npm init -y && npm install node-fetch
 ```
 
 That creates a `package.json` and installs `node-fetch` (used by the HA module).
 
 ### Step 5 – Basic config in `matrix.mjs`
 
-Open `matrix.mjs` in a text editor (nano, vim, VS Code, whatever) and set these at the top:
+Open `matrix.mjs` and set these near the top:
 
 ```js
-// Hostname or IP of your WLED matrix device
 const WLED_IP = "wled-2f1f50.local";
-
-// WLED UDP Realtime (DRGB) port
 const UDP_PORT = 21324;
 
-// Physical matrix dimensions
 const WIDTH = 32;
 const HEIGHT = 8;
 
-// Scroll speed in ms between steps (bigger = slower)
-const SCROLL_INTERVAL_MS = 60;
-
-// Default text color
-const DEFAULT_COLOR = { r: 4, g: 0, b: 0 };
+// ms between column steps (bigger = slower)
+const SCROLL_INTERVAL_MS = 40;
 ```
 
 Change:
@@ -109,9 +100,11 @@ From the project folder:
 node matrix.mjs
 ```
 
-If all is right, you’ll see some logs in the terminal and text will start marching across the matrix.
+Optional: if your host machine timezone isn’t what you want for the day/night schedule, run with a timezone override:
 
-If you see nothing or garbage, go to **Troubleshooting** at the bottom.
+```bash
+MATRIX_TZ=America/Chicago node matrix.mjs
+```
 
 ---
 
@@ -122,7 +115,7 @@ If you see nothing or garbage, go to **Troubleshooting** at the bottom.
   * Opens a UDP socket to WLED (DRGB realtime mode).
   * Holds a small 5×7 bitmap font.
   * Converts strings → 5-column glyphs → a stream of frames.
-  * Sends those frames to WLED as `[2,2] + RGB bytes` over UDP.
+  * Sends those frames to WLED as `[2, 2] + RGB bytes` over UDP.
   * Walks a list of modules; each module runs once per loop and returns one string.
 
 * **Modules**: ES modules that export an object with `id` and `getText()`:
@@ -134,7 +127,7 @@ If you see nothing or garbage, go to **Troubleshooting** at the bottom.
   };
   ```
 
-If `getText()` returns `""`, the framework skips that module for that pass.
+If `getText()` returns `""`, the engine skips that module for that pass.
 
 ---
 
@@ -153,7 +146,6 @@ Typical folder contents:
 Module wiring is at the top of `matrix.mjs`:
 
 ```js
-import dgram from "dgram";
 import haData from "./hadata.mjs";
 import mpdData from "./mpddata.mjs";
 // import lobsters from "./lobsters.mjs";
@@ -176,9 +168,135 @@ const MODULES = [
 
 ---
 
-## 3. Module configuration
+## 3. Text color behavior (day/night schedule)
 
-### 3.1 Home Assistant – `hadata.mjs`
+The engine supports **scheduled color behavior**:
+
+* **Day mode (color cycling):** 07:00 → 18:00
+* **Night mode (static dim red):** 18:00 → 07:00
+
+This is implemented in `getCurrentTextColor()` by comparing `secondsSinceMidnight` against:
+
+```js
+const dayStart = 7 * 3600;   // 07:00
+const dayEnd   = 18 * 3600;  // 18:00
+```
+
+Outside that window, it returns `NIGHT_COLOR`:
+
+```js
+const NIGHT_COLOR = { r: 4, g: 0, b: 0 };
+```
+
+### 3.1 Daytime color cycling
+
+During day mode, text color cycles smoothly through hue space. The **full loop time** is:
+
+```js
+const DAY_CYCLE_SECONDS = 3600; // example: 1 hour per full color cycle
+```
+
+Daytime brightness/saturation are controlled by:
+
+```js
+const DAY_SAT = 1.0;
+const DAY_VAL = 0.12;
+```
+
+If you’re running very dim, low values can look “steppy” on LEDs. There’s an optional temporal dither to smooth the quantization:
+
+```js
+const ENABLE_DITHER = 1; // 1 = on, 0 = off
+```
+
+### 3.2 Timezone for the schedule
+
+By default, the day/night schedule uses the host’s local time.
+
+If the box running Node has a different timezone than you want, set `MATRIX_TZ`:
+
+```bash
+MATRIX_TZ=America/Chicago node matrix.mjs
+```
+
+`MATRIX_TZ` must be an IANA timezone string (e.g. `America/Chicago`, `America/New_York`, etc.).
+
+### 3.3 Changing the schedule
+
+To change the schedule window, edit these in `getCurrentTextColor()`:
+
+```js
+const dayStart = 7 * 3600;
+const dayEnd   = 18 * 3600;
+```
+
+Examples:
+
+* Cycle 06:00 → 22:00
+
+  ```js
+  const dayStart = 6 * 3600;
+  const dayEnd   = 22 * 3600;
+  ```
+
+* Cycle only 09:00 → 17:00
+
+  ```js
+  const dayStart = 9 * 3600;
+  const dayEnd   = 17 * 3600;
+  ```
+
+---
+
+## 4. Engine configuration options (quick reference)
+
+Edit in `matrix.mjs` unless noted.
+
+### 4.1 WLED + matrix
+
+```js
+const WLED_IP = "wled-xxxx.local"; // or an IP
+const UDP_PORT = 21324;
+
+const WIDTH = 32;
+const HEIGHT = 8;
+```
+
+### 4.2 Scrolling speed
+
+```js
+const SCROLL_INTERVAL_MS = 40;
+```
+
+Higher = slower. Lower = faster.
+
+### 4.3 Color schedule + cycling
+
+```js
+const NIGHT_COLOR = { r: 4, g: 0, b: 0 };
+
+const DAY_CYCLE_SECONDS = 3600;
+const DAY_SAT = 1.0;
+const DAY_VAL = 0.12;
+
+const ENABLE_DITHER = 1;
+
+// env var (optional)
+// MATRIX_TZ=America/Chicago
+```
+
+And the window itself is inside `getCurrentTextColor()`:
+
+```js
+const dayStart = 7 * 3600;
+const dayEnd   = 18 * 3600;
+```
+
+---
+
+## 5. Module configuration
+
+### 5.1 Home Assistant – `hadata.mjs`
 
 Top of the file looks like:
 
@@ -194,73 +312,50 @@ const INSIDE3 = "sensor.living_room_temperature";
 What to do:
 
 1. Set `HA_URL` to your Home Assistant base URL.
-2. Create a long-lived access token in Home Assistant and paste it as `HA_TOKEN`.
-3. Change `INSIDE1/2/3` to real entity IDs from your system.
+2. Create a long-lived access token and paste it as `HA_TOKEN`.
+3. Change `INSIDE1/2/3` to real entity IDs.
 
-When it works, you’ll get lines like:
+Example output:
 
 ```text
 Dec 1  Mbr: 72°F  BDR: 70°F  LR: 71°F
 ```
 
-### 3.2 MPD – `mpddata.mjs`
+### 5.2 MPD – `mpddata.mjs`
 
 At the top:
 
 ```js
 const MPD_HOST = "YOURMPDINSTANCEBYIP";
 const MPD_PORT = 6600;
-const MPD_PASSWORD = "";   // set if you use a password
+const MPD_PASSWORD = "";
 const MPD_TIMEOUT_MS = 250;
 ```
 
-Set:
-
-* `MPD_HOST` and `MPD_PORT` to your MPD instance.
-* `MPD_PASSWORD` if your MPD requires one.
-
 Behavior:
 
-* If MPD is playing:
+* If MPD is playing: returns `Artist - Title` (fallbacks if needed).
+* If paused/stopped/unreachable: returns `""` so the module is skipped.
 
-  * Returns `Artist - Title` (falls back to `name` or `file` if needed).
-* If MPD is paused/stopped or unreachable:
-
-  * Returns `""` so this module is skipped.
-
-### 3.3 Weather – `wttr.mjs`
+### 5.3 Weather – `wttr.mjs`
 
 At the top:
 
 ```js
 const LOCATION = "YourCity";
 const WTTR_URL = "https://wttr.in/YourCity?format=j1";
-const CACHE_MS = 15 * 60 * 1000; // 15 minutes
+const CACHE_MS = 15 * 60 * 1000;
 ```
 
-Change:
+### 5.4 Time – `time.mjs`
 
-* `LOCATION` to the name you like.
-* `WTTR_URL` if you want a different wttr.in query.
-* `CACHE_MS` if you want more/less aggressive caching.
-
-It builds a line with:
-
-* Current temp
-* Today’s high/low
-* Max chance of rain for the day
-
-### 3.4 Time – `time.mjs`
-
-No real config. It uses system time and returns a 12-hour string:
+No real config. Uses system time and returns a 12-hour string:
 
 ```text
 6:42 PM
 ```
 
-Turn it on/off by including/removing it from `MODULES` in `matrix.mjs`.
-
-### 3.5 File ticker – `filedata.mjs`
+### 5.5 File ticker – `filedata.mjs`
 
 At the top:
 
@@ -268,23 +363,15 @@ At the top:
 const FILE_PATH = "/home/youruser/wled-matrix/output.txt";
 ```
 
-Set `FILE_PATH` to any UTF-8 text file.
-
 Behavior:
 
 * Reads the file.
 * Collapses whitespace/newlines into one long line.
-* Returns:
+* Returns cleaned content, or `[FILE EMPTY]`, or `[FILE ERROR]`.
 
-  * The cleaned content if the file has text.
-  * `[FILE EMPTY]` if the file is blank.
-  * `[FILE ERROR]` if something went wrong reading it.
-
-### 3.6 Lobsters RSS – `lobsters.mjs`
+### 5.6 Lobsters RSS – `lobsters.mjs`
 
 Defaults to `https://lobste.rs/rss`.
-
-It grabs some recent titles, decodes basic entities, and returns them joined into one ticker line.
 
 Config options inside that module let you change:
 
@@ -293,7 +380,7 @@ Config options inside that module let you change:
 
 ---
 
-## 4. Running it
+## 6. Running it
 
 From the project folder:
 
@@ -301,30 +388,20 @@ From the project folder:
 node matrix.mjs
 ```
 
-If you want a simple `npm start` shortcut, edit `package.json` and add:
-
-```json
-"scripts": {
-  "start": "node matrix.mjs"
-}
-```
-
-Then you can run:
+With a timezone override:
 
 ```bash
-npm start
+MATRIX_TZ=America/Chicago node matrix.mjs
 ```
 
-To keep it alive long-term:
+For long-running:
 
-* Use `tmux` or `screen` and leave it running.
-* Or write a small `systemd` service that runs `node /path/to/matrix.mjs`.
+* Use `tmux`/`screen`, or
+* Write a small `systemd` unit to run `node /path/to/matrix.mjs`.
 
 ---
 
-## 5. How the scrolling works (short version)
-
-You don’t have to touch this, but here’s what happens:
+## 7. How the scrolling works (short version)
 
 1. The engine normalizes text and looks up each character in a 5×7 font map.
 2. Each character becomes 5 columns of bits plus a blank spacer column.
@@ -332,10 +409,9 @@ You don’t have to touch this, but here’s what happens:
 4. The engine slides a window of width `WIDTH` across that strip.
 5. For each step:
 
-   * It builds a full `WIDTH × HEIGHT` RGB frame in memory.
-   * It writes those bytes into a buffer: `[2, 2, r, g, b, r, g, b, ...]`.
-   * Sends the buffer to WLED over UDP.
-   * Waits `SCROLL_INTERVAL_MS` and moves one column left.
+   * It builds a full `WIDTH × HEIGHT` RGB frame.
+   * It sends `[2, 2, r, g, b, r, g, b, ...]` over UDP.
+   * It waits `SCROLL_INTERVAL_MS` and moves one column.
 
 Pixel index mapping is **row-major**:
 
@@ -345,50 +421,17 @@ x: 0 → WIDTH-1 (left to right)
 y: 0 → HEIGHT-1 (top to bottom)
 ```
 
-If it looks mirrored / upside-down, fix the **2D layout** options in WLED, not the code.
+If it looks mirrored / upside-down, fix the **2D layout** in WLED, not the code.
 
 ---
 
-## 6. Writing your own module
-
-Template:
-
-```js
-// mymodule.mjs
-const myModule = {
-  id: "my-module",
-  getText: async () => {
-    // do whatever here: HTTP request, file read, random nonsense, etc.
-    const value = "HELLO MATRIX";
-    return value;      // return "" to skip this module
-  },
-};
-
-export default myModule;
-```
-
-Wire it into `matrix.mjs`:
-
-```js
-import myModule from "./mymodule.mjs";
-
-const MODULES = [
-  // other modules...
-  myModule,
-];
-```
-
-That’s it. If you return a string, it shows up. If you return "", it’s invisible for that pass.
-
----
-
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 ### Nothing shows on the matrix
 
 Checklist:
 
-1. **Can you ping WLED from the Node box?**
+1. Can you reach WLED from the Node box?
 
    ```bash
    ping yourwled.local
@@ -396,64 +439,42 @@ Checklist:
    ping 192.168.88.50
    ```
 
-2. **LED count correct?**
+2. LED count correct?
 
-   * In WLED, total LEDs should equal `WIDTH * HEIGHT`.
+   * Total LEDs should equal `WIDTH * HEIGHT`.
 
-3. **Realtime allowed?**
+3. Realtime allowed?
 
-   * In WLED UI → Sync Interfaces:
+   * In WLED → Sync Interfaces: make sure UDP realtime is enabled/allowed.
 
-     * Make sure realtime UDP is allowed and not blocked by some setting.
+4. Firewall:
 
-4. **Firewall:**
-
-   * If you have a firewall, make sure UDP/21324 is not being dropped.
-
-5. **Try a dumb test:**
-
-   * Temporarily set `MODULES = [ time ];` and see if the time scrolls.
-   * If that works, the engine is fine; another module is failing.
+   * Ensure UDP/21324 isn’t being dropped.
 
 ### Text is backwards / scrambled
 
-* The code assumes straight row-major wiring.
-* In WLED’s 2D settings:
-
-  * Flip rotation, mirroring, and serpentine/zigzag options until text looks correct.
-* Don’t edit the matrix math in `matrix.mjs` until you’ve exhausted WLED’s options.
+* The code assumes straight row-major mapping.
+* In WLED’s 2D settings, flip rotation/mirroring/serpentine until it’s correct.
 
 ### MPD never shows anything
 
-* From the Node box, try:
+From the Node box:
 
-  ```bash
-  telnet MPD_HOST MPD_PORT
-  ```
+```bash
+telnet MPD_HOST MPD_PORT
+```
 
-  You should see something like `OK MPD 0.22.x`.
-
-* Check `MPD_HOST`, `MPD_PORT`, and `MPD_PASSWORD` in `mpddata.mjs`.
-
-* Remember: if MPD is paused or stopped, this module intentionally returns `""`.
+You should see something like `OK MPD 0.22.x`.
 
 ### Home Assistant line looks wrong
 
-* Check `HA_URL` by hitting `HA_URL/api/` in a browser or curl.
-* Verify the long-lived token and that it has API permissions.
-* Confirm the entity IDs in `INSIDE1/2/3` actually exist.
+* Verify `HA_URL` and token.
+* Confirm entity IDs actually exist.
 
-### Weather line is empty or weird
+### Weather line is empty/weird
 
-* Hit the URL from the module in a browser:
-
-  ```text
-  https://wttr.in/YourCity?format=j1
-  ```
-
-* Make sure the machine can reach wttr.in (no DNS or firewall issues).
-
-* Lower `CACHE_MS` if you’re testing and want faster updates.
+* Open the wttr URL in a browser.
+* Lower `CACHE_MS` for faster testing.
 
 ---
 
