@@ -1,80 +1,62 @@
 // matrix.mjs - WLED matrix framework
-//
-// This file is the "engine": it talks to WLED, scrolls text on the 8x32 matrix,
-// and calls modules (like hadata.mjs) to get text to show.
-// Modules only need to export: { id, getText() } where getText() returns a string.
 
-// ====== BASIC DISPLAY + WLED CONFIG ======
-
-// Hostname or IP of your WLED matrix device
-const WLED_IP = "wled-2f1f50.local";
-
-// WLED UDP Realtime (DRGB) port (default 21324 in WLED Sync Interfaces)
+const WLED_IP = "192.168.88.85";
 const UDP_PORT = 21324;
 
-// Physical matrix dimensions
+let WLED_ADDR = WLED_IP;
+let USE_CONNECTED_SEND = false;
+
 const WIDTH = 32;
 const HEIGHT = 8;
 const LEDS = WIDTH * HEIGHT;
 
-// Reusable RGB frame buffer to avoid per-frame allocations
 const FRAME_RGB = new Uint8Array(LEDS * 3);
 
-// Scroll timing: how fast the text moves (ms between column steps).
-// Bigger number = slower scroll; smaller = faster.
-// Try values like:
-//   80  = fast
-//   120 = medium
-//   180 = slower
-const SCROLL_INTERVAL_MS = 60;
+const SCROLL_INTERVAL_MS = 24;
 
-// Default text color (for all modules).
-// Very dim red: tweak r down if you want even dimmer.
-const DEFAULT_COLOR = { r: 4, g: 0, b: 0 };
+const MATRIX_TZ = process.env.MATRIX_TZ; // optional, e.g. America/Chicago
 
-// =========================================
+const NIGHT_COLOR = { r: 4, g: 0, b: 0 };
+
+// Full hue loop time during daytime
+const DAY_CYCLE_SECONDS = 120; // 1 hour per full cycle
+
+// Daytime brightness/saturation (tune these)
+const DAY_SAT = 1.0;
+const DAY_VAL = 0.12;
+
+// Temporal dithering helps smooth low values (1 = on, 0 = off)
+const ENABLE_DITHER = 1;
 
 import dgram from "dgram";
-import haData from "./hadata.mjs";   // HA temps + date module
+import { lookup } from "node:dns/promises";
+import haData from "./hadata.mjs";
 import mpdData from "./mpddata.mjs";
-// import lobsters from "./lobsters.mjs";
-// import filedata from "./filedata.mjs";
 import wttr from "./wttr.mjs";
 import time from "./time.mjs";
-import octoprint from "./octoprint.mjs";
 
-// List of modules that will be shown in sequence.
-//
-// Each module must export:
-//   {
-//     id: "someName",
-//     getText: async () => "STRING TO SCROLL"
-//   }
-//
-// The main loop will:
-//   module 0 → scroll once
-//   module 1 → scroll once
-//   ... then back to module 0
-const MODULES = [
-  haData,
-  mpdData,
-//  lobsters,
-//  filedata,
-  wttr,
-  octoprint,
-  time, 
-];
+const MODULES = [haData, mpdData, wttr, time];
 
-// Create UDP socket for sending DRGB packets to WLED
 const sock = dgram.createSocket("udp4");
 
-// 5x7 bitmap font (monospace-ish).
-// Each entry is 5 bytes, one per column, with bits as vertical pixels.
-// Bit layout: LSB = top pixel (y=0), next bit = y=1, etc.
+async function initWledTarget() {
+  try {
+    const res = await lookup(WLED_IP, { family: 4 });
+    if (res && res.address) WLED_ADDR = res.address;
+  } catch (e) {
+    WLED_ADDR = WLED_IP;
+  }
+
+  try {
+    sock.connect(UDP_PORT, WLED_ADDR);
+    USE_CONNECTED_SEND = true;
+  } catch (e) {
+    USE_CONNECTED_SEND = false;
+  }
+}
+
 const FONT = {
   " ": [0x00,0x00,0x00,0x00,0x00],
-
-  // Digits 0–9
   "0": [0x3E,0x51,0x49,0x45,0x3E],
   "1": [0x00,0x42,0x7F,0x40,0x00],
   "2": [0x42,0x61,0x51,0x49,0x46],
@@ -86,7 +68,6 @@ const FONT = {
   "8": [0x36,0x49,0x49,0x49,0x36],
   "9": [0x06,0x49,0x49,0x29,0x1E],
 
-  // Uppercase A–Z
   "A": [0x7E,0x11,0x11,0x11,0x7E],
   "B": [0x7F,0x49,0x49,0x49,0x36],
   "C": [0x3E,0x41,0x41,0x41,0x22],
@@ -114,14 +95,12 @@ const FONT = {
   "Y": [0x07,0x08,0x70,0x08,0x07],
   "Z": [0x61,0x51,0x49,0x45,0x43],
 
-  // Basic punctuation
   "-": [0x08,0x08,0x08,0x08,0x08],
   ":": [0x00,0x36,0x36,0x00,0x00],
   ".": [0x00,0x40,0x60,0x00,0x00],
   ",": [0x00,0x40,0x20,0x00,0x00],
   "/": [0x20,0x10,0x08,0x04,0x02],
 
-  // Extra chars (subset of ASCII)
   "!": [0x00,0x00,0x5F,0x00,0x00],
   "?": [0x02,0x01,0x51,0x09,0x06],
   "+": [0x08,0x08,0x3E,0x08,0x08],
@@ -149,71 +128,140 @@ function normalizeChar(ch) {
   return " ";
 }
 
-// Render a text string into an array of columns (each column is a byte).
-// We add one blank column (0x00) between characters.
 function renderText(str) {
   const cols = [];
   for (const rawCh of str) {
     const ch = normalizeChar(rawCh);
     const glyph = FONT[ch] || FONT[" "];
-    for (const col of glyph) {
-      cols.push(col & 0x7F); // 7 bits used
-    }
-    cols.push(0x00); // spacing
+    for (const col of glyph) cols.push(col & 0x7F);
+    cols.push(0x00);
   }
   return cols;
 }
 
-// =======================
-// MATRIX HELPERS
-// =======================
-
-// Straight row-major mapping.
-// X: left→right, Y: top→bottom.
-// No serpentine, every row goes left→right in memory.
 function xyToIndex(x, y) {
   return y * WIDTH + x;
 }
 
-// Convert a font bit (0/1) into RGB using the default color.
-function colToRGB(bit) {
-  if (!bit) return [0,0,0];
-  const c = DEFAULT_COLOR;
-  return [c.r, c.g, c.b];
+function getLocalHMS() {
+  if (!MATRIX_TZ) {
+    const d = new Date();
+    return { h: d.getHours(), m: d.getMinutes(), s: d.getSeconds() };
+  }
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: MATRIX_TZ,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date());
+
+  const get = (type) => Number(parts.find(p => p.type === type)?.value ?? 0);
+  return { h: get("hour"), m: get("minute"), s: get("second") };
 }
 
-// =======================
-// PACKING DRGB FOR WLED
-// =======================
-//
-// Original super-simple DRGB v2 header: [2,2] followed by raw RGB bytes.
+// HSV -> RGB in 0..1 floats
+function hsv01ToRgb01(h01, s, v) {
+  const h = (h01 % 1) * 6;
+  const i = Math.floor(h);
+  const f = h - i;
+  const p = v * (1 - s);
+  const q = v * (1 - s * f);
+  const t = v * (1 - s * (1 - f));
 
-function packUDP(rgbArray) {
-  const header = Buffer.from([2, 2]);
-  return Buffer.concat([header, Buffer.from(rgbArray)]);
+  let r=0,g=0,b=0;
+  if (i === 0)      { r=v; g=t; b=p; }
+  else if (i === 1) { r=q; g=v; b=p; }
+  else if (i === 2) { r=p; g=v; b=t; }
+  else if (i === 3) { r=p; g=q; b=v; }
+  else if (i === 4) { r=t; g=p; b=v; }
+  else              { r=v; g=p; b=q; }
+
+  return { r, g, b };
 }
 
-// Simple sleep helper
+// Quantize with optional temporal dithering.
+// phase should change slowly (we use frameCounter).
+function quantize255(x, phase) {
+  const y = x * 255;
+  const base = Math.floor(y);
+  const frac = y - base;
+  if (!ENABLE_DITHER) return Math.max(0, Math.min(255, base));
+  // simple 1D dither: bump up on alternating phases proportional to frac
+  const bump = (phase % 256) < (frac * 256) ? 1 : 0;
+  return Math.max(0, Math.min(255, base + bump));
+}
+
+function getCurrentTextColor(frameCounter) {
+  const { h, m, s } = getLocalHMS();
+  const secondsSinceMidnight = (h * 3600) + (m * 60) + s;
+
+  const dayStart = 7 * 3600;
+  const dayEnd   = 20 * 3600;
+
+  if (secondsSinceMidnight < dayStart || secondsSinceMidnight >= dayEnd) {
+    return NIGHT_COLOR;
+  }
+
+  // Smooth hue: 0..1 over DAY_CYCLE_SECONDS with sub-second precision
+  const nowSec = Date.now() / 1000;
+  const h01 = (nowSec % DAY_CYCLE_SECONDS) / DAY_CYCLE_SECONDS;
+
+  const rgb01 = hsv01ToRgb01(h01, DAY_SAT, DAY_VAL);
+
+  // Quantize to 0..255 with dithering to smooth low-level steps
+  const phase = frameCounter & 255;
+  return {
+    r: quantize255(rgb01.r, phase + 0),
+    g: quantize255(rgb01.g, phase + 85),
+    b: quantize255(rgb01.b, phase + 170),
+  };
+}
+
+const PACKET = Buffer.allocUnsafe(2 + FRAME_RGB.length);
+PACKET[0] = 2;
+PACKET[1] = 2;
+
+function getPacket() {
+  PACKET.set(FRAME_RGB, 2);
+  return PACKET;
+}
+
+function nowMs() {
+  return Number(process.hrtime.bigint() / 1000000n);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// =======================
-// SCROLLING LOGIC
-// =======================
+function udpSend(packet) {
+  return new Promise((resolve) => {
+    if (USE_CONNECTED_SEND) {
+      sock.send(packet, () => resolve());
+    } else {
+      sock.send(packet, UDP_PORT, WLED_ADDR, () => resolve());
+    }
+  });
+}
 
 async function scrollMessage(text) {
   const textCols = renderText(text);
   const totalCols = textCols.length;
   if (totalCols === 0) return;
 
-  // Treat text as a virtual strip. offset = how far it's shifted left.
-  const startOffset = WIDTH;        // start fully off-screen to the right
-  const endOffset   = -totalCols;   // finish fully off-screen to the left
+  const startOffset = WIDTH;
+  const endOffset   = -totalCols;
+
+  let frameCounter = 0;
 
   for (let offset = startOffset; offset > endOffset; offset--) {
-    // Clear frame each step
+    const frameStart = nowMs();
     FRAME_RGB.fill(0);
+
+    // IMPORTANT FIX: lock the color ONCE per frame (no intra-frame time drift)
+    const frameColor = getCurrentTextColor(frameCounter++);
 
     for (let x = 0; x < WIDTH; x++) {
       const srcIndex = x - offset;
@@ -223,40 +271,43 @@ async function scrollMessage(text) {
 
       for (let y = 0; y < HEIGHT; y++) {
         const bit = (col >> y) & 1;
-        const [r,g,b] = colToRGB(bit);
+        if (!bit) continue;
 
         const idx = xyToIndex(x, y);
         const base = idx * 3;
-        if (base + 2 < FRAME_RGB.length) {
-          FRAME_RGB[base]   = r;
-          FRAME_RGB[base+1] = g;
-          FRAME_RGB[base+2] = b;
-        }
+        FRAME_RGB[base]   = frameColor.r;
+        FRAME_RGB[base+1] = frameColor.g;
+        FRAME_RGB[base+2] = frameColor.b;
       }
     }
 
-    sock.send(packUDP(FRAME_RGB), UDP_PORT, WLED_IP);
-    await sleep(SCROLL_INTERVAL_MS);
+    await udpSend(getPacket());
+
+    const elapsed = nowMs() - frameStart;
+    let delay = SCROLL_INTERVAL_MS - elapsed;
+    if (delay < 0) delay = SCROLL_INTERVAL_MS;
+    await sleep(delay);
   }
 
-  // A couple of blank frames for a tiny pause between messages
   FRAME_RGB.fill(0);
   for (let i = 0; i < 2; i++) {
-    sock.send(packUDP(FRAME_RGB), UDP_PORT, WLED_IP);
-    await sleep(SCROLL_INTERVAL_MS);
+    const frameStart = nowMs();
+    await udpSend(getPacket());
+
+    const elapsed = nowMs() - frameStart;
+    let delay = SCROLL_INTERVAL_MS - elapsed;
+    if (delay < 0) delay = SCROLL_INTERVAL_MS;
+    await sleep(delay);
   }
 }
 
-// Main loop:
-//  - runs forever
-//  - for each module in MODULES:
-//      - calls module.getText() to get a string
-//      - scrolls that string once using scrollMessage()
-//  - after the last module, wraps back to the first
 async function main() {
+  await initWledTarget();
   console.log("Starting WLED matrix scroller (UDP Realtime DRGB)…");
-  console.log("WLED target:", WLED_IP + ":" + UDP_PORT);
+  console.log("WLED target:", WLED_ADDR + ":" + UDP_PORT, USE_CONNECTED_SEND ? "(connected)" : "(unconnected)");
   console.log("Matrix size:", WIDTH, "x", HEIGHT, "(", LEDS, "LEDs )");
+  if (MATRIX_TZ) console.log("MATRIX_TZ:", MATRIX_TZ);
+  console.log("Day cycle seconds:", DAY_CYCLE_SECONDS);
 
   while (true) {
     for (const mod of MODULES) {
